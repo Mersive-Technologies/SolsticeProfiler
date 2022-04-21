@@ -168,13 +168,13 @@ class ProfileSession:
 
     def writeCsv( self ):
         # HEADER row
-        output = f"Time|Process|CPU%|Memory|State|Process Info Gathering Time\n"
+        output = f"Time,Process,CPU%,Memory,State,Process Info Gathering Time\n"
         if len(self.applicationStateSamples) > 0:
             for applicationStateSample in self.applicationStateSamples:
                 for performanceSnapshot in applicationStateSample.samples:
                     # TODO: merge GPU stats into same row
                     for processSnapshot in performanceSnapshot.processSnapshots:
-                        output += f"{datetime.datetime.fromtimestamp(performanceSnapshot.time)}|{processSnapshot.processName}|{processSnapshot.cpuPercentageUsed}|{processSnapshot.memory}|{applicationStateSample.state}|{performanceSnapshot.timeToGatherSample}\n"
+                        output += f"{datetime.datetime.fromtimestamp(performanceSnapshot.time)},{processSnapshot.processName},{processSnapshot.cpuPercentageUsed},{processSnapshot.memory},{applicationStateSample.state},{performanceSnapshot.timeToGatherSample}\n"
         fileName = f"Solstice-Profile-{datetime.datetime.fromtimestamp(performanceSnapshot.time)}.csv"
         fileName = fileName.replace(":", "_")
         file = open(fileName, "w")
