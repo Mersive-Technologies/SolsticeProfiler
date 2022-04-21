@@ -1,10 +1,16 @@
 import argparse
 from fileinput import filename
 import psutil
-import nvidia_smi
 import time
 import datetime
 from enum import Enum
+
+NVidiaLibAvailable = True
+IntelGPULibAvailable = False
+try:
+    import nvidia_smi
+except ModuleNotFoundError:
+    NVidiaLibAvailable = False
 
 SolsticeClientProcess = "SolsticeClient.exe"
 VirtualDisplayProcess = "SolsticeVirtualDisplay.exe"
@@ -18,7 +24,7 @@ def parseArguments():
     parser.add_argument( "-l", "--length", help="Length of the profile session." )
     parser.add_argument( "-f", "--frequency", help="Samples gathered per minute." )
     parser.add_argument( "-s", "--secondsPerState", help="There are three states for the client app, Idle, Sharing, and Conference. How long in seconds to gather samples after each state change. 0 is infinite." )
-    parser.add_argument( "-g", "--gpu", help="1 (default): profile NVidia GPUs. 0: Don't profile GPU usage." )
+    parser.add_argument( "-g", "--gpu", help="1 (default): profile GPU usage. 0: Don't profile GPU usage." )
     return parser.parse_args()
 
 def startSession( args ):
@@ -126,6 +132,8 @@ class ApplicationState(Enum):
     IDLE = 2
     SHARING = 3
     CONFERENCE = 4
+    def __str__(self):
+        return self.name
 
 class ApplicationStateSamples:
     def __init__( self, state ):
@@ -148,8 +156,6 @@ class ProfileSession:
         self.sampleDelay = sampleDelay
         self.secondsPerState = secondsPerState
         self.profileGPU = profileGPU
-        self.intelGpuProfilingEnabled = False
-        self.nvidiaProfilingEnabled = False
         self.sessionLengthSeconds = sessionLengthSeconds
 
     def printStartSession( self ):
@@ -186,10 +192,11 @@ if __name__ == '__main__':
     args = parseArguments()
     session = startSession(args)
 
-    if session.profileGPU:
+    if session.profileGPU and NVidiaLibAvailable:
         try:
             nvidia_smi.nvmlInit()
         except:
+            NVidiaLibAvailable = False
             print ( "Could not initialize nvidia library" )
 
     gatherSamples = True
@@ -198,11 +205,13 @@ if __name__ == '__main__':
     currentApplicationStateSamples = None
     firstSampleTaken = True
     changedStatesLastFrame = False
+    validStatesInSession = False
+    appClosedTimeoutStart = None
 
     while gatherSamples:
         performanceSnapshot = PerformanceSnapshot()
 
-        if session.nvidiaProfilingEnabled:
+        if session.profileGPU and NVidiaLibAvailable:
             deviceCount = nvidia_smi.nvmlDeviceGetCount()
             for i in range(deviceCount):
                 handle = nvidia_smi.nvmlDeviceGetHandleByIndex(i)
@@ -234,6 +243,11 @@ if __name__ == '__main__':
             currentApplicationState = performanceSnapshot.currentApplicationState()
             if currentApplicationState != applicationState:
                 print( f"Application state changed from {applicationState} to {currentApplicationState}" )
+                if currentApplicationState != ApplicationState.NONE:
+                    validStatesInSession = True
+                    appClosedTimeoutStart = None
+                elif currentApplicationState == ApplicationState.NONE and validStatesInSession:
+                    appClosedTimeoutStart = time.time()
                
                 # Don't store rapid state changes
                 if currentApplicationStateSamples and not changedStatesLastFrame:
@@ -244,6 +258,10 @@ if __name__ == '__main__':
                 changedStatesLastFrame = True
             else:
                 changedStatesLastFrame = False
+
+        # Close out the profiler after Solstice closes
+        if appClosedTimeoutStart != None and time.time() - appClosedTimeoutStart > 5:
+            gatherSamples = False
 
         if applicationState != ApplicationState.NONE and \
             time.time() - currentApplicationStateSamples.stateStarted < session.secondsPerState and \
@@ -266,7 +284,7 @@ if __name__ == '__main__':
     if currentApplicationStateSamples:
         session.applicationStateSamples.append(currentApplicationStateSamples)
 
-    if session.nvidiaProfilingEnabled:
+    if session.profileGPU and NVidiaLibAvailable:
         nvidia_smi.nvmlShutdown()
 
     print(str(session))
