@@ -3,10 +3,14 @@ from fileinput import filename
 import psutil
 import time
 import datetime
+import json
+import os
 from enum import Enum
+from git import Repo
 
 NVidiaLibAvailable = True
 IntelGPULibAvailable = False
+
 try:
     import nvidia_smi
 except ModuleNotFoundError:
@@ -21,31 +25,66 @@ ProcessesToFind = [ SolsticeClientProcess, VirtualDisplayProcess, SolsticeConfer
 
 def parseArguments():
     parser = argparse.ArgumentParser()
+    parser.add_argument( "-c", "--config", help="Use a config file instead of passing arguments")
     parser.add_argument( "-l", "--length", help="Length of the profile session." )
     parser.add_argument( "-f", "--frequency", help="Samples gathered per minute." )
     parser.add_argument( "-s", "--secondsPerState", help="There are three states for the client app, Idle, Sharing, and Conference. How long in seconds to gather samples after each state change. 0 is infinite." )
     parser.add_argument( "-g", "--gpu", help="1 (default): profile GPU usage. 0: Don't profile GPU usage." )
+    parser.add_argument( "-u", "--units", help="Human readable units, MB instead of bytes, etc.", action='store_false')
+    parser.add_argument( "-z", "--zeroPercentageInReport", help="Report instances where CPU is zero.", action='store_false')
+    parser.add_argument( "-t", "--transitionStateSeconds", help="How long after a state changes is it considered in a transition state")
     return parser.parse_args()
 
 def startSession( args ):
+    global Session
     frequency = 60
     secondsPerState = 15
-    profileGPU = True
-    length = 30
+    profileGPU = False
+    length = 0
+    humanReadable = False
+    solsticeRoot = None
+    zeroPercentageInReport = False
+    secondsToWaitAfterSolsticeCloses = 5
+    secondsForTransition = 10
 
-    if( args.frequency ):
-        frequency = float( args.frequency )
-    if( args.secondsPerState ):
-        secondsPerState = float( args.secondsPerState )
-    if( args.gpu == "0"):
-        profileGPU = False
-    if( args.length ):
-        length = float( args.length )
+    if args.config:
+        f = open( args.config )
+        data = json.load(f)
+        f.close()
+        if data["solsticeRoot"]:
+            solsticeRoot = data["solsticeRoot"]
+        if data["frequency"]:
+            frequency = float( data["frequency"] )
+        if data["secondsPerState"]:
+            secondsPerState = float( data["secondsPerState"] )
+        if data["gpu"]:
+            profileGPU = data["gpu"]
+        if data["length"]:
+            length = float( data["length"] )
+        if data["humanReadableUnits"]:
+            humanReadable = bool( data["humanReadableUnits"] )
+        if data["zeroPercentageInReport"]:
+            zeroPercentageInReport = bool( data["zeroPercentageInReport"] )
+        if data["secondsToWaitAfterSolsticeCloses"]:
+            secondsToWaitAfterSolsticeCloses = data["secondsToWaitAfterSolsticeCloses"]
+        if data["secondsForTransition"]:
+            secondsForTransition = data["secondsForTransition"]
+    else:
+        if( args.frequency ):
+            frequency = float( args.frequency )
+        if( args.secondsPerState ):
+            secondsPerState = float( args.secondsPerState )
+        if( args.gpu == "0"):
+            profileGPU = False
+        if( args.length ):
+            length = float( args.length )
+
+        zeroPercentageInReport = args.zeroPercentageInReport
+        humanReadable = args.units
 
     sampleDelay = 60 / frequency 
-    session = ProfileSession( frequency, sampleDelay, secondsPerState, profileGPU, length )
-    session.printStartSession()
-    return session
+    Session = ProfileSession( solsticeRoot, frequency, sampleDelay, secondsPerState, profileGPU, length, humanReadable, zeroPercentageInReport, secondsToWaitAfterSolsticeCloses, secondsForTransition )
+    Session.printStartSession()
 
 class GPUSnapshot:
     def __init__( self, device, memory, temperature, gpuPercentageUsed ):
@@ -101,6 +140,12 @@ class PerformanceSnapshot:
             output += str(gpu)
         output += "], time={self.time}, timeToGatherSample={self.timeToGatherSample})"
 
+    def addGPUSample( self, device, memory, temperature, gpuPercentageUsed ):
+        self.gpuSnapshots.append( GPUSnapshot( device, memory, temperature, gpuPercentageUsed ) )
+
+    def addProcessSample( self, processName, cpuPercentage, memoryUsed ):
+        self.processSnapshots.append( ProcessSnapshot( processName, cpuPercentage, memoryUsed ) )
+
     def currentApplicationState( self ):
         virtualMonitor = False
         solstice = False
@@ -123,23 +168,86 @@ class PerformanceSnapshot:
             return ApplicationState.CONFERENCE
         elif solstice and virtualMonitor:
             return ApplicationState.SHARING
-
         return ApplicationState.NONE            
 
 class ApplicationState(Enum):
     NONE = 0
     STARTUP = 1
     IDLE = 2
-    SHARING = 3
-    CONFERENCE = 4
+    SHARING_STARTUP = 3
+    SHARING = 4
+    CONFERENCE_STARTUP = 5
+    CONFERENCE = 6
+    RETURN_TO_IDLE = 7
     def __str__(self):
         return self.name
+
+class ProcessStateAverage:
+    def __init__ ( self, state, processName ):
+        self.state = state
+        self.processName = processName
+        self.cpuPercentageTotal = 0
+        self.memoryUsedTotal = 0
+        self.numberOfSamples = 0
+        self.lowestCpuUsed = None
+        self.highestCpuUsed = 0
+        self.lowestMemoryUsed = None
+        self.highestMemoryUsed = 0
+        self.earliestSample = None
+        self.latestSample = None
+
+    def addSample ( self, time, cpuPercentage, memoryUsed ):
+        if self.earliestSample is None or time <= self.earliestSample:
+            self.earliestSample = time
+        elif self.latestSample is None or time >= self.latestSample:
+            self.latestSample = time
+
+        self.numberOfSamples += 1
+        self.cpuPercentageTotal += cpuPercentage
+        self.memoryUsedTotal += memoryUsed
+        if ( self.lowestCpuUsed is None or cpuPercentage < self.lowestCpuUsed ) and cpuPercentage != 0:
+            self.lowestCpuUsed = cpuPercentage
+        if cpuPercentage > self.highestCpuUsed:
+            self.highestCpuUsed = cpuPercentage
+        if ( self.lowestMemoryUsed is None or memoryUsed < self.lowestMemoryUsed ) and memoryUsed != 0:
+            self.lowestMemoryUsed = memoryUsed
+        if memoryUsed >= self.highestMemoryUsed:
+            self.highestMemoryUsed = memoryUsed            
+
+    def averageCPU( self ):
+        return self.cpuPercentageTotal / self.numberOfSamples
+
+    def averageMemory( self ):
+        total = self.memoryUsedTotal / self.numberOfSamples
+        if Session.humanReadableUnits:
+            total = total / 1024 / 1024
+        return total
+    
+    def timeInState( self ):
+        if self.latestSample is None or self.earliestSample is None:
+            return 0
+        return self.latestSample - self.earliestSample
+
+    def csvRow( self ):
+        lowestMem = self.lowestMemoryUsed
+        highestMem = self.highestMemoryUsed
+        if Session.humanReadableUnits:
+            lowestMem = lowestMem / 1024 / 1024
+            highestMem = highestMem / 1024 / 1024
+        lowestCpu = 0
+        if self.lowestCpuUsed is not None:
+            lowestCpu = self.lowestCpuUsed
+        return f"{self.processName},{self.state},{self.timeInState()},{self.numberOfSamples},{lowestCpu},{self.highestCpuUsed},{lowestMem},{highestMem},{self.averageCPU()},{self.averageMemory()}\n" 
+
 
 class ApplicationStateSamples:
     def __init__( self, state ):
         self.stateStarted = time.time()
         self.state = state
         self.samples = []
+    
+    def addStateSamples( self, samples ):
+        self.samples.append( samples )
 
     def __str__(self):
         output = f"Application started state {self.state} at {datetime.datetime.fromtimestamp(self.stateStarted)}. Samples:\n"
@@ -149,18 +257,35 @@ class ApplicationStateSamples:
         return output  
 
 class ProfileSession:
-    def __init__( self, frequency, sampleDelay, secondsPerState, profileGPU, sessionLengthSeconds ):
+    def __init__( self, solsticeRoot, frequency, sampleDelay, secondsPerState, profileGPU, sessionLengthSeconds, 
+        humanReadableUnits, zeroPercentageInReport, secondsToWaitAfterSolsticeCloses, transitionStateSeconds ):
         self.startedAt = time.time()
+        self.solsticeRoot = solsticeRoot
         self.applicationStateSamples = []
+        self.applicationStateAverages = []
         self.frequency = frequency
         self.sampleDelay = sampleDelay
         self.secondsPerState = secondsPerState
         self.profileGPU = profileGPU
         self.sessionLengthSeconds = sessionLengthSeconds
+        self.humanReadableUnits = humanReadableUnits
+        self.zeroPercentageInReport = zeroPercentageInReport
+        self.secondsToWaitAfterSolsticeCloses = secondsToWaitAfterSolsticeCloses
+        self.transitionStateSeconds = transitionStateSeconds
 
     def printStartSession( self ):
-        print( f"Profiling Solstice at frequency [{self.frequency} Hz] Sample time per state [{self.secondsPerState} seconds] sampleDelay [{self.sampleDelay} seconds] Session Length [{self.sessionLengthSeconds} seconds]." )
-        print( f"Started session at {datetime.datetime.fromtimestamp(self.startedAt)}")        
+        sessionLength = f"{self.sessionLengthSeconds} seconds"
+        if self.sessionLengthSeconds == 0:
+            sessionLength = "Until Solstice closes"
+        print( f"Profiling Solstice with settings:" )
+        print( f"  Frequency (samples per minute): {self.frequency}" )
+        print( f"  Time per state (seconds): {self.secondsPerState}" )
+        print( f"  Length of transition period between states (seconds): {self.transitionStateSeconds}" )
+        print( f"  Session length: {sessionLength}" )
+        print( f"  Seconds to wait after Solstice closes to end profiling: {self.secondsToWaitAfterSolsticeCloses}")
+        if ( self.solsticeRoot ):
+            print(f'  Solstice root: "{self.solsticeRoot}"')
+        print( f"Started session at {datetime.datetime.fromtimestamp(self.startedAt)}\n")        
 
     def __str__(self):
         output = f""
@@ -173,26 +298,89 @@ class ProfileSession:
         return output
 
     def writeCsv( self ):
-        # HEADER row
-        output = f"Time,Process,CPU%,Memory,State,Process Info Gathering Time\n"
+        dataWritten = False
+        # HEADER rows
+        memoryUnits = ""
+        if self.humanReadableUnits:
+            memoryUnits += " (MB)"
+        else:
+            memoryUnits += " (bytes)"
+        averageOutput = f"Process,State,Time in State,# Samples,Lowest CPU %,Highest CPU %,Lowest Memory Used{memoryUnits}, Highest Memory Used{memoryUnits},Average CPU &,Average Memory Used{memoryUnits}\n"  
+        output = f"Time,Process,CPU%,Memory Used{memoryUnits},State\n"
+
+        # Sample data
         if len(self.applicationStateSamples) > 0:
             for applicationStateSample in self.applicationStateSamples:
+                processAverages = []
                 for performanceSnapshot in applicationStateSample.samples:
-                    # TODO: merge GPU stats into same row
                     for processSnapshot in performanceSnapshot.processSnapshots:
-                        output += f"{datetime.datetime.fromtimestamp(performanceSnapshot.time)},{processSnapshot.processName},{processSnapshot.cpuPercentageUsed},{processSnapshot.memory},{applicationStateSample.state},{performanceSnapshot.timeToGatherSample}\n"
-        fileName = f"Solstice-Profile-{datetime.datetime.fromtimestamp(performanceSnapshot.time)}.csv"
+                        currentAverage = None
+                        # Gather the averages from this state
+                        for pa in processAverages:
+                            if pa.processName == processSnapshot.processName:
+                                currentAverage = pa
+                                break
+                        if not currentAverage:
+                            currentAverage = ProcessStateAverage( applicationStateSample.state, processSnapshot.processName )
+                            processAverages.append( currentAverage )
+                        currentAverage.addSample( performanceSnapshot.time, processSnapshot.cpuPercentageUsed, processSnapshot.memory )
+
+                        # Don't write zero % CPU if not set
+                        if not self.zeroPercentageInReport and processSnapshot.cpuPercentageUsed == 0:
+                            continue
+
+                        # Accumulate CSV output for raw samples
+                        dataWritten = True
+                        memory = processSnapshot.memory
+                        if self.humanReadableUnits:
+                            memory = memory / 1024 / 1024
+                        output += f"{datetime.datetime.fromtimestamp(performanceSnapshot.time)},{processSnapshot.processName},{processSnapshot.cpuPercentageUsed},{memory},{applicationStateSample.state}\n"
+                for pa in processAverages:
+                    # TODO: merge GPU stats into same row
+                    averageOutput += pa.csvRow()
+
+        # Use commit metadata for filename if available
+        if self.solsticeRoot:
+            repo = Repo( self.solsticeRoot )
+            assert not repo.bare
+            headcommit = repo.head.commit
+            fileName = f"Solstice-Profile-{datetime.datetime.fromtimestamp(headcommit.committed_date)}-{repo.head.ref}-{headcommit.hexsha}"
+        else:
+            fileName = f"Solstice-Profile-{datetime.datetime.fromtimestamp(Session.startedAt)}"
+
         fileName = fileName.replace(":", "_")
-        file = open(fileName, "w")
-        file.write(output)
-        file.close()
-        print(f"Wrote file: {fileName}")
+        if dataWritten:
+            # Don't clobber existing files
+            maxAttempts = 1000
+            if os.path.exists( f"{fileName}.csv" ):
+                for i in range(2, maxAttempts):
+                    newFileName = f"{fileName}_v{i}.csv"
+                    if not os.path.exists( newFileName ):
+                        fileName = newFileName
+                        break
+                if i == maxAttempts - 1:
+                    print( f"Failed to create new csv file with root: {fileName}")
+                    exit( 1 )
+            else:
+                fileName = fileName + ".csv"
+                        
+            file = open(fileName, "w")
+            file.write(averageOutput)
+            file.write("\n\n\n")
+            file.write(output)
+            file.close()
+            print(f"Wrote file: {fileName}")
+        else:
+            print( f"{fileName} NOT written since there were no sample outputs")
+
+    def addStateSamples( self, samples ):
+        self.applicationStateSamples.append( samples )
 
 if __name__ == '__main__':
     args = parseArguments()
-    session = startSession(args)
+    startSession(args)
 
-    if session.profileGPU and NVidiaLibAvailable:
+    if Session.profileGPU and NVidiaLibAvailable:
         try:
             nvidia_smi.nvmlInit()
         except:
@@ -211,7 +399,7 @@ if __name__ == '__main__':
     while gatherSamples:
         performanceSnapshot = PerformanceSnapshot()
 
-        if session.profileGPU and NVidiaLibAvailable:
+        if Session.profileGPU and NVidiaLibAvailable:
             deviceCount = nvidia_smi.nvmlDeviceGetCount()
             for i in range(deviceCount):
                 handle = nvidia_smi.nvmlDeviceGetHandleByIndex(i)
@@ -221,7 +409,7 @@ if __name__ == '__main__':
                 memory = 0
                 temperature = 0
                 gpuPercentageUsed = 0
-                performanceSnapshot.gpuSnapshots.append( GPUSnapshot( device, memory, temperature, gpuPercentageUsed ) )
+                performanceSnapshot.addGPUSample( device, memory, temperature, gpuPercentageUsed )
 
         timeToQuery = time.time()
         processes = [proc for proc in psutil.process_iter()]
@@ -234,15 +422,61 @@ if __name__ == '__main__':
                         firstSampleTaken = False
                         continue
                     percentage = percentage / psutil.cpu_count()
-                    performanceSnapshot.processSnapshots.append( ProcessSnapshot( process.name(), percentage, process.memory_full_info().uss ) )
+                    performanceSnapshot.addProcessSample( process.name(), percentage, process.memory_full_info().uss )
         except Exception as e:
             print( f"Warning: sample failed due to {e}" )
             continue
 
         if len( performanceSnapshot.processSnapshots ) > 0 or applicationState != ApplicationState.NONE:
             currentApplicationState = performanceSnapshot.currentApplicationState()
+
+            stateRunningPastTransition = False
+            if currentApplicationStateSamples:
+                stateRunningPastTransition = time.time() - currentApplicationStateSamples.stateStarted > Session.transitionStateSeconds
+
+            # determine if we are in a transitional state
+            if ( applicationState == ApplicationState.NONE or applicationState == None ) and currentApplicationState == ApplicationState.IDLE:
+                currentApplicationState = ApplicationState.STARTUP
+                currentApplicationStateSamples = None
+                stateRunningPastTransition = False
+
+            if currentApplicationState == ApplicationState.IDLE and applicationState == ApplicationState.STARTUP and not stateRunningPastTransition:
+                currentApplicationState = ApplicationState.STARTUP
+            elif currentApplicationState == ApplicationState.SHARING and applicationState == ApplicationState.IDLE:
+                currentApplicationState = ApplicationState.SHARING_STARTUP
+            elif currentApplicationState == ApplicationState.SHARING and applicationState == ApplicationState.SHARING_STARTUP and not stateRunningPastTransition:
+                currentApplicationState = ApplicationState.SHARING_STARTUP
+            elif currentApplicationState == ApplicationState.CONFERENCE and applicationState == ApplicationState.IDLE:
+                currentApplicationState = ApplicationState.CONFERENCE_STARTUP
+            elif currentApplicationState == ApplicationState.CONFERENCE and applicationState == ApplicationState.CONFERENCE_STARTUP and not stateRunningPastTransition:
+                currentApplicationState = ApplicationState.CONFERENCE_STARTUP
+            elif currentApplicationState == ApplicationState.IDLE and applicationState == ApplicationState.CONFERENCE:
+                currentApplicationState = ApplicationState.RETURN_TO_IDLE
+            elif currentApplicationState == ApplicationState.IDLE and applicationState == ApplicationState.SHARING:
+                currentApplicationState = ApplicationState.RETURN_TO_IDLE                
+            elif currentApplicationState == ApplicationState.IDLE and applicationState == ApplicationState.RETURN_TO_IDLE and not stateRunningPastTransition:
+                currentApplicationState = ApplicationState.RETURN_TO_IDLE                
+            
+            # handle post transition state
+            if applicationState == ApplicationState.STARTUP and stateRunningPastTransition:
+                currentApplicationState = ApplicationState.IDLE
+            elif applicationState == ApplicationState.SHARING_STARTUP and stateRunningPastTransition:
+                currentApplicationState = ApplicationState.SHARING
+            elif applicationState == ApplicationState.CONFERENCE_STARTUP and stateRunningPastTransition:
+                currentApplicationState = ApplicationState.CONFERENCE
+            elif applicationState == ApplicationState.RETURN_TO_IDLE and stateRunningPastTransition:
+                currentApplicationState = ApplicationState.IDLE                                                
+
             if currentApplicationState != applicationState:
-                print( f"Application state changed from {applicationState} to {currentApplicationState}" )
+                if applicationState == ApplicationState.NONE:
+                    print( f"Application detected in {currentApplicationState} state" )
+                elif applicationState != None and currentApplicationState == ApplicationState.NONE:
+                    print( f"Solstice application closed, exiting in {Session.secondsToWaitAfterSolsticeCloses} seconds unless new state is seen..." )                    
+                elif applicationState != None:
+                    print( f"Application state changed from {applicationState} to {currentApplicationState}" )
+                elif applicationState == None and currentApplicationState == ApplicationState.NONE:
+                    print( f"Searching for Solstice processes..." )
+
                 if currentApplicationState != ApplicationState.NONE:
                     validStatesInSession = True
                     appClosedTimeoutStart = None
@@ -250,12 +484,13 @@ if __name__ == '__main__':
                     appClosedTimeoutStart = time.time()
                
                 # Don't store rapid state changes
-                if currentApplicationStateSamples and not changedStatesLastFrame:
-                    session.applicationStateSamples.append(currentApplicationStateSamples)
+                if currentApplicationStateSamples and len( currentApplicationStateSamples.samples ) > 0:
+                    Session.addStateSamples(currentApplicationStateSamples)
 
                 currentApplicationStateSamples = ApplicationStateSamples( currentApplicationState )
                 applicationState = currentApplicationState
                 changedStatesLastFrame = True
+                showStopGathering = True
             else:
                 changedStatesLastFrame = False
 
@@ -264,11 +499,15 @@ if __name__ == '__main__':
             gatherSamples = False
 
         if applicationState != ApplicationState.NONE and \
-            time.time() - currentApplicationStateSamples.stateStarted < session.secondsPerState and \
+            ( Session.secondsPerState == 0 or time.time() - currentApplicationStateSamples.stateStarted < Session.secondsPerState ) and \
             ( len( performanceSnapshot.gpuSnapshots ) > 0 or len( performanceSnapshot.processSnapshots ) > 0 ):
             currentApplicationStateSamples.samples.append( performanceSnapshot )
 
-        delay = session.sampleDelay - performanceSnapshot.timeToGatherSample
+        if Session.secondsPerState != 0 and time.time() - currentApplicationStateSamples.stateStarted >= Session.secondsPerState and not showStopGathering:
+            print("State sample timeout reached. Waiting for state change to start gathering additional samples.")
+            showStopGathering = False
+
+        delay = Session.sampleDelay - performanceSnapshot.timeToGatherSample
         # per docs:
         # https://psutil.readthedocs.io/en/latest/#psutil.Process.cpu_percent
         # When interval is 0.0 or None compares process times to system CPU times elapsed since last call, returning immediately. 
@@ -278,14 +517,14 @@ if __name__ == '__main__':
             delay = 0.1
         time.sleep( delay )
 
-        if time.time() - startTime > session.sessionLengthSeconds:
+        if Session.sessionLengthSeconds != 0 and time.time() - startTime > Session.sessionLengthSeconds:
             gatherSamples = False
 
-    if currentApplicationStateSamples:
-        session.applicationStateSamples.append(currentApplicationStateSamples)
+    if currentApplicationStateSamples and len(currentApplicationStateSamples.samples) > 0:
+        Session.applicationStateSamples.append(currentApplicationStateSamples)
 
-    if session.profileGPU and NVidiaLibAvailable:
+    if Session.profileGPU and NVidiaLibAvailable:
         nvidia_smi.nvmlShutdown()
 
-    print(str(session))
-    session.writeCsv()
+    print(str(Session))
+    Session.writeCsv()

@@ -1,0 +1,11 @@
+{
+    "solsticeRoot": "C:\\Git\\Solstice\\",
+    "length": 0,
+    "frequency": 20,
+    "secondsPerState": 30,
+    "secondsForTransition": 10,
+    "gpu": false,
+    "humanReadableUnits": true,
+    "zeroPercentageInReport": false,
+    "secondsToWaitAfterSolsticeCloses": 3
+}
