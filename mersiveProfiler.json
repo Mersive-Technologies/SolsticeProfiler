@@ -2,7 +2,7 @@
     "solsticeRoot": "C:\\Git\\Solstice\\",
     "length": 0,
     "frequency": 20,
-    "secondsPerState": 30,
+    "secondsPerState": 60,
     "secondsForTransition": 10,
     "gpu": false,
     "humanReadableUnits": true,

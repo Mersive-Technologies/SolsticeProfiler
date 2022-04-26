@@ -6,7 +6,12 @@ import datetime
 import json
 import os
 from enum import Enum
-from git import Repo
+
+GithubLibAvailable = True
+try:
+    from git import Repo
+except ModuleNotFoundError:
+    GithubLibAvailable = False
 
 NVidiaLibAvailable = True
 IntelGPULibAvailable = False
@@ -298,6 +303,7 @@ class ProfileSession:
         return output
 
     def writeCsv( self ):
+        global GithubLibAvailable
         dataWritten = False
         # HEADER rows
         memoryUnits = ""
@@ -340,12 +346,18 @@ class ProfileSession:
                     averageOutput += pa.csvRow()
 
         # Use commit metadata for filename if available
-        if self.solsticeRoot:
-            repo = Repo( self.solsticeRoot )
-            assert not repo.bare
-            headcommit = repo.head.commit
-            fileName = f"Solstice-Profile-{datetime.datetime.fromtimestamp(headcommit.committed_date)}-{repo.head.ref}-{headcommit.hexsha}"
-        else:
+        useBackupFilename = True
+        if GithubLibAvailable and self.solsticeRoot and self.solsticeRoot != "":
+            try:
+                repo = Repo( self.solsticeRoot )
+                assert not repo.bare
+                headcommit = repo.head.commit
+                fileName = f"Solstice-Profile-{datetime.datetime.fromtimestamp(headcommit.committed_date)}-{repo.head.ref}-{headcommit.hexsha}"
+                useBackupFilename = False
+            except:
+                pass
+            
+        if useBackupFilename:
             fileName = f"Solstice-Profile-{datetime.datetime.fromtimestamp(Session.startedAt)}"
 
         fileName = fileName.replace(":", "_")
