@@ -7,6 +7,10 @@ import json
 import os
 from enum import Enum
 
+SolsticeClientProcess = "SolsticeClient.exe"
+VirtualDisplayProcess = "SolsticeVirtualDisplay.exe"
+SolsticeConferenceProcess = "SolsticeConference.exe"
+RsusbipclientProcess = "rsusbipclient.exe"
 GithubLibAvailable = True
 try:
     from git import Repo
@@ -33,12 +37,13 @@ def parseArguments():
     parser.add_argument( "-s", "--samplesPerState", help="There are three states for the client app, Idle, Sharing, and Conference. How many samples to gather after each state change. 0 is infinite." )
     parser.add_argument( "-g", "--gpu", help="1 (default): profile GPU usage. 0: Don't profile GPU usage." )
     parser.add_argument( "-u", "--humanReadableUnits", help="Human readable units, MB instead of bytes, etc.", action='store_false')
-    parser.add_argument( "-z", "--zeroPercentageInReport", help="Report instances where CPU is zero.", action='store_false')
+    parser.add_argument( "-z", "--zeroPercentageInReport", help="Report instances where CPU is zero.", action='store_true')
     parser.add_argument( "-t", "--transitionStateSeconds", help="How long after a state changes is it considered in a transition state")
     return parser.parse_args()
 
 def startSession( args ):
     global Session
+    global SolsticeClientProcess, VirtualDisplayProcess, SolsticeConferenceProcess, RsusbipclientProcess 
     samplesPerMinute = 60
     samplesPerState = 10
     profileGPU = False
@@ -67,13 +72,14 @@ def startSession( args ):
         exit( 1 )
 
     try:
-        # These are required values so allow crash if not present
-        global SolsticeClientProcess = data["processSolsticeClient"]
-        global VirtualDisplayProcess = data["processVirtualDisplay"]
-        global SolsticeConferenceProcess = data["processSolsticeConference"]
-        global RsusbipclientProcess = data["processRsusbipclient"]
-
-        # optional values
+        if "processSolsticeClient" in data:
+            SolsticeClientProcess = data["processSolsticeClient"]
+        if "processVirtualDisplay" in data:
+            VirtualDisplayProcess = data["processVirtualDisplay"]
+        if "processSolsticeConference" in data:
+            SolsticeConferenceProcess = data["processSolsticeConference"]
+        if "processRsusbipclient" in data:
+            RsusbipclientProcess = data["processRsusbipclient"]
         if "solsticeRoot" in data:
             solsticeRoot = data["solsticeRoot"]
         if "samplesPerMinute" in data:
@@ -305,11 +311,17 @@ class ProfileSession:
         sessionLength = f"{self.sessionLengthSeconds} seconds"
         if self.sessionLengthSeconds == 0:
             sessionLength = "Until Solstice closes"
+        samplesPerState = "Unlimited"
+        if self.samplesPerState != 0:
+            samplesPerState = self.samplesPerState
         print( f"Profiling Solstice with settings:" )
+        print( f"  Solstice processes: {SolsticeClientProcess}, {VirtualDisplayProcess}, {SolsticeConferenceProcess}, {RsusbipclientProcess}")
         print( f"  Frequency (samples per minute): {self.samplesPerMinute}" )
-        print( f"  Number of samples per non-transitional state: {self.samplesPerState}" )
+        print( f"  Number of samples per non-transitional state: {samplesPerState}" )
         print( f"  Length of transition period between states (seconds): {self.transitionStateSeconds}" )
         print( f"  Session length: {sessionLength}" )
+        print( f"  GPU Profiling: {self.profileGPU}" )
+        print( f"  Include 0% CPU samples in report output: {self.zeroPercentageInReport}" )        
         print( f"  Seconds to wait after Solstice closes to end profiling: {self.secondsToWaitAfterSolsticeCloses}")
         if ( self.solsticeRoot ):
             print(f'  Solstice root: "{self.solsticeRoot}"')

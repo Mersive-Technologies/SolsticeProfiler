@@ -10,5 +10,5 @@
     "processSolsticeClient": "SolsticeClient.exe",
     "processVirtualDisplay": "SolsticeVirtualDisplay.exe",
     "processSolsticeConference": "SolsticeConference.exe",
-    "processRsusbipclientProcess": "rsusbipclient.exe"
+    "processRsusbipclient": "rsusbipclient.exe"
 }
