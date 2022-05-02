@@ -30,6 +30,8 @@ In the config file are the following properties:
 * "processVirtualDisplay": The name of the virtual display process, change for different OS.
 * "processSolsticeConference": The name of the Solstice Conference process, change for different OS.
 * "processRsusbipclientProcess": The name of the rsubipclient process, change for different OS.
+* "statesToReport": Only report samples and averages for the states in the list. The full list is: [ "STARTUP", "SHARING_STARTUP", "SHARING", "CONFERENCE_STARTUP", "CONFERENCE", "RETURN_TO_IDLE" ],
+* "includeRawSamplesInReport": If true then a second data set will be written to the output report with the raw sample data. If false then it will only report averages.
 
 Flags which can be passed from the command line:
 

@@ -10,5 +10,7 @@
     "processSolsticeClient": "SolsticeClient.exe",
     "processVirtualDisplay": "SolsticeVirtualDisplay.exe",
     "processSolsticeConference": "SolsticeConference.exe",
-    "processRsusbipclient": "rsusbipclient.exe"
+    "processRsusbipclient": "rsusbipclient.exe",
+    "statesToReport": [ "STARTUP", "IDLE", "SHARING_STARTUP", "SHARING", "CONFERENCE_STARTUP", "CONFERENCE", "RETURN_TO_IDLE" ],
+    "includeRawSamplesInReport": false
 }

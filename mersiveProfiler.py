@@ -53,6 +53,8 @@ def startSession( args ):
     zeroPercentageInReport = False
     secondsToWaitAfterSolsticeCloses = 5
     secondsForTransition = 10
+    statesToReport = []
+    includeRawSamplesInReport = False
 
     currentPath = os.path.dirname( __file__ )
     configFile = os.path.join( currentPath, "mersiveProfiler.json" )
@@ -98,6 +100,24 @@ def startSession( args ):
             secondsToWaitAfterSolsticeCloses = data["secondsToWaitAfterSolsticeCloses"]
         if "secondsForTransition" in data:
             secondsForTransition = data["secondsForTransition"]
+        if "statesToReport" in data:
+            for state in data["statesToReport"]:
+                if state == "STARTUP":
+                    statesToReport.append( ApplicationState.STARTUP )
+                if state == "IDLE":
+                    statesToReport.append( ApplicationState.IDLE )
+                if state == "SHARING_STARTUP":
+                    statesToReport.append( ApplicationState.SHARING_STARTUP )
+                if state == "SHARING":
+                    statesToReport.append( ApplicationState.SHARING )
+                if state == "CONFERENCE_STARTUP":
+                    statesToReport.append( ApplicationState.CONFERENCE_STARTUP )
+                if state == "CONFERENCE":
+                    statesToReport.append( ApplicationState.CONFERENCE )
+                if state == "RETURN_TO_IDLE":
+                    statesToReport.append( ApplicationState.RETURN_TO_IDLE )
+        if "includeRawSamplesInReport" in data:
+            includeRawSamplesInReport = bool( data["includeRawSamplesInReport"] )                    
     except:
         print( "Failed to read config file, exiting." )
         exit( 1 )
@@ -117,7 +137,11 @@ def startSession( args ):
         humanReadableUnits = args.humanReadableUnits
 
     sampleDelay = 60 / samplesPerMinute 
-    Session = ProfileSession( solsticeRoot, samplesPerMinute, sampleDelay, samplesPerState, profileGPU, totalSessionLength, humanReadableUnits, zeroPercentageInReport, secondsToWaitAfterSolsticeCloses, secondsForTransition )
+    if len( statesToReport ) == 0:
+        print("No states to report are defined. Please provide at least one state in config's statesToReport")
+        exit( 1 )
+
+    Session = ProfileSession( solsticeRoot, samplesPerMinute, sampleDelay, samplesPerState, profileGPU, totalSessionLength, humanReadableUnits, zeroPercentageInReport, secondsToWaitAfterSolsticeCloses, secondsForTransition, statesToReport, includeRawSamplesInReport )
     Session.printStartSession()
 
 class GPUSnapshot:
@@ -292,7 +316,8 @@ class ApplicationStateSamples:
 
 class ProfileSession:
     def __init__( self, solsticeRoot, samplesPerMinute, sampleDelay, samplesPerState, profileGPU, sessionLengthSeconds, 
-        humanReadableUnits, zeroPercentageInReport, secondsToWaitAfterSolsticeCloses, transitionStateSeconds ):
+        humanReadableUnits, zeroPercentageInReport, secondsToWaitAfterSolsticeCloses, transitionStateSeconds,
+        statesToReport, includeRawSamplesInReport ):
         self.startedAt = time.time()
         self.solsticeRoot = solsticeRoot
         self.applicationStateSamples = []
@@ -306,6 +331,8 @@ class ProfileSession:
         self.zeroPercentageInReport = zeroPercentageInReport
         self.secondsToWaitAfterSolsticeCloses = secondsToWaitAfterSolsticeCloses
         self.transitionStateSeconds = transitionStateSeconds
+        self.statesToReport = statesToReport
+        self.includeRawSamplesInReport = includeRawSamplesInReport
 
     def printStartSession( self ):
         sessionLength = f"{self.sessionLengthSeconds} seconds"
@@ -323,6 +350,9 @@ class ProfileSession:
         print( f"  GPU Profiling: {self.profileGPU}" )
         print( f"  Include 0% CPU samples in report output: {self.zeroPercentageInReport}" )        
         print( f"  Seconds to wait after Solstice closes to end profiling: {self.secondsToWaitAfterSolsticeCloses}")
+        states = [ str( state ) for state in self.statesToReport ]
+        print( f"  States to include in report: { states }")
+        print( f"  Include raw sample data in report: {self.includeRawSamplesInReport}")        
         if ( self.solsticeRoot ):
             print(f'  Solstice root: "{self.solsticeRoot}"')
         print( f"Started session at {datetime.datetime.fromtimestamp(self.startedAt)}\n")        
@@ -347,13 +377,17 @@ class ProfileSession:
         else:
             memoryUnits += " (bytes)"
         averageOutput = f"Process,State,Time in State,# Samples,Lowest CPU %,Highest CPU %,Lowest Memory Used{memoryUnits}, Highest Memory Used{memoryUnits},Average CPU &,Average Memory Used{memoryUnits}\n"  
-        output = f"Time,Process,CPU%,Memory Used{memoryUnits},State,Time To Gather Sample\n"
+        
+        if Session.includeRawSamplesInReport:
+            output = f"Time,Process,CPU%,Memory Used{memoryUnits},State,Time To Gather Sample\n"
 
         # Sample data
         if len(self.applicationStateSamples) > 0:
             for applicationStateSample in self.applicationStateSamples:
                 processAverages = []
                 for performanceSnapshot in applicationStateSample.samples:
+                    if applicationStateSample.state not in Session.statesToReport:
+                        continue
                     for processSnapshot in performanceSnapshot.processSnapshots:
                         currentAverage = None
                         # Gather the averages from this state
@@ -372,10 +406,12 @@ class ProfileSession:
 
                         # Accumulate CSV output for raw samples
                         dataWritten = True
-                        memory = processSnapshot.memory
-                        if self.humanReadableUnits:
-                            memory = memory / 1024 / 1024
-                        output += f"{datetime.datetime.fromtimestamp(performanceSnapshot.time)},{processSnapshot.processName},{processSnapshot.cpuPercentageUsed},{memory},{applicationStateSample.state},{performanceSnapshot.timeToGatherSample}\n"
+
+                        if Session.includeRawSamplesInReport:
+                            memory = processSnapshot.memory
+                            if self.humanReadableUnits:
+                                memory = memory / 1024 / 1024
+                            output += f"{datetime.datetime.fromtimestamp(performanceSnapshot.time)},{processSnapshot.processName},{processSnapshot.cpuPercentageUsed},{memory},{applicationStateSample.state},{performanceSnapshot.timeToGatherSample}\n"
                 for pa in processAverages:
                     # TODO: merge GPU stats into same row
                     averageOutput += pa.csvRow()
@@ -413,8 +449,9 @@ class ProfileSession:
                         
             file = open(fileName, "w")
             file.write(averageOutput)
-            file.write("\n\n\n")
-            file.write(output)
+            if Session.includeRawSamplesInReport:
+                file.write("\n\n\n")
+                file.write(output)
             file.close()
             print(f"Wrote file: {fileName}")
         else:
@@ -519,12 +556,16 @@ if __name__ == '__main__':
                 currentApplicationState = ApplicationState.IDLE                                                
 
             if currentApplicationState != applicationState:
+                stateGatheringStatus = "Not gathering samples for this state."
+                if currentApplicationState in Session.statesToReport:
+                    stateGatheringStatus = "Currently gathering samples for this state."
+
                 if applicationState == ApplicationState.NONE:
-                    print( f"Application detected in {currentApplicationState} state" )
+                    print( f"Application detected in {currentApplicationState} state. {stateGatheringStatus}" )
                 elif applicationState != None and currentApplicationState == ApplicationState.NONE:
                     print( f"Solstice application closed, exiting in {Session.secondsToWaitAfterSolsticeCloses} seconds unless new state is seen..." )                    
                 elif applicationState != None:
-                    print( f"Application state changed from {applicationState} to {currentApplicationState}" )
+                    print( f"Application state changed from {applicationState} to {currentApplicationState}. {stateGatheringStatus}" )
                 elif applicationState == None and currentApplicationState == ApplicationState.NONE:
                     print( f"Searching for Solstice processes..." )
 
