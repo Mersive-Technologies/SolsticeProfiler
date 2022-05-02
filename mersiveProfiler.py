@@ -21,74 +21,97 @@ try:
 except ModuleNotFoundError:
     NVidiaLibAvailable = False
 
-SolsticeClientProcess = "SolsticeClient.exe"
-VirtualDisplayProcess = "SolsticeVirtualDisplay.exe"
-SolsticeConferenceProcess = "SolsticeConference.exe"
-RsusbipclientProcess = "rsusbipclient.exe"
+CPUCount = psutil.cpu_count()
 
 ProcessesToFind = [ SolsticeClientProcess, VirtualDisplayProcess, SolsticeConferenceProcess, RsusbipclientProcess ]
 
 def parseArguments():
     parser = argparse.ArgumentParser()
     parser.add_argument( "-c", "--config", help="Use a config file instead of passing arguments")
-    parser.add_argument( "-l", "--length", help="Length of the profile session." )
-    parser.add_argument( "-f", "--frequency", help="Samples gathered per minute." )
-    parser.add_argument( "-s", "--secondsPerState", help="There are three states for the client app, Idle, Sharing, and Conference. How long in seconds to gather samples after each state change. 0 is infinite." )
+    parser.add_argument( "-l", "--totalSessionLength", help="Length of the profile session. Set 0 for until Solstice closes." )
+    parser.add_argument( "-m", "--samplesPerMinute", help="Samples gathered per minute." )
+    parser.add_argument( "-s", "--samplesPerState", help="There are three states for the client app, Idle, Sharing, and Conference. How many samples to gather after each state change. 0 is infinite." )
     parser.add_argument( "-g", "--gpu", help="1 (default): profile GPU usage. 0: Don't profile GPU usage." )
-    parser.add_argument( "-u", "--units", help="Human readable units, MB instead of bytes, etc.", action='store_false')
+    parser.add_argument( "-u", "--humanReadableUnits", help="Human readable units, MB instead of bytes, etc.", action='store_false')
     parser.add_argument( "-z", "--zeroPercentageInReport", help="Report instances where CPU is zero.", action='store_false')
     parser.add_argument( "-t", "--transitionStateSeconds", help="How long after a state changes is it considered in a transition state")
     return parser.parse_args()
 
 def startSession( args ):
     global Session
-    frequency = 60
-    secondsPerState = 15
+    samplesPerMinute = 60
+    samplesPerState = 10
     profileGPU = False
-    length = 0
-    humanReadable = False
+    totalSessionLength = 0
+    humanReadableUnits = False
     solsticeRoot = None
     zeroPercentageInReport = False
     secondsToWaitAfterSolsticeCloses = 5
     secondsForTransition = 10
 
+    currentPath = os.path.dirname( __file__ )
+    configFile = os.path.join( currentPath, "mersiveProfiler.json" )
+
     if args.config:
-        f = open( args.config )
+        configFile = args.config
+
+    print( f"Using config file: {configFile}")
+
+    data = None
+    try:
+        f = open( configFile )
         data = json.load(f)
         f.close()
-        if data["solsticeRoot"]:
+    except:
+        print( "Failed to load config file, exiting." )
+        exit( 1 )
+
+    try:
+        # These are required values so allow crash if not present
+        global SolsticeClientProcess = data["processSolsticeClient"]
+        global VirtualDisplayProcess = data["processVirtualDisplay"]
+        global SolsticeConferenceProcess = data["processSolsticeConference"]
+        global RsusbipclientProcess = data["processRsusbipclient"]
+
+        # optional values
+        if "solsticeRoot" in data:
             solsticeRoot = data["solsticeRoot"]
-        if data["frequency"]:
-            frequency = float( data["frequency"] )
-        if data["secondsPerState"]:
-            secondsPerState = float( data["secondsPerState"] )
-        if data["gpu"]:
+        if "samplesPerMinute" in data:
+            samplesPerMinute = float( data["samplesPerMinute"] )
+        if "samplesPerState" in data:
+            samplesPerState = int( data["samplesPerState"] )
+        if "gpu" in data:
             profileGPU = data["gpu"]
-        if data["length"]:
-            length = float( data["length"] )
-        if data["humanReadableUnits"]:
-            humanReadable = bool( data["humanReadableUnits"] )
-        if data["zeroPercentageInReport"]:
+        if "totalSessionLength" in data:
+            totalSessionLength = float( data["totalSessionLength"] )
+        if "humanReadableUnits" in data:
+            humanReadableUnits = bool( data["humanReadableUnits"] )
+        if "zeroPercentageInReport" in data:
             zeroPercentageInReport = bool( data["zeroPercentageInReport"] )
-        if data["secondsToWaitAfterSolsticeCloses"]:
+        if "secondsToWaitAfterSolsticeCloses" in data:
             secondsToWaitAfterSolsticeCloses = data["secondsToWaitAfterSolsticeCloses"]
-        if data["secondsForTransition"]:
+        if "secondsForTransition" in data:
             secondsForTransition = data["secondsForTransition"]
-    else:
-        if( args.frequency ):
-            frequency = float( args.frequency )
-        if( args.secondsPerState ):
-            secondsPerState = float( args.secondsPerState )
-        if( args.gpu == "0"):
-            profileGPU = False
-        if( args.length ):
-            length = float( args.length )
-
+    except:
+        print( "Failed to read config file, exiting." )
+        exit( 1 )
+    
+    # Override config values with flags
+    if( args.samplesPerMinute ):
+        samplesPerMinute = float( args.samplesPerMinute )
+    if( args.samplesPerState ):
+        samplesPerState = int( args.samplesPerState )
+    if( args.gpu == "0"):
+        profileGPU = False
+    if( args.totalSessionLength ):
+        totalSessionLength = float( args.totalSessionLength )
+    if args.zeroPercentageInReport:
         zeroPercentageInReport = args.zeroPercentageInReport
-        humanReadable = args.units
+    if args.humanReadableUnits:
+        humanReadableUnits = args.humanReadableUnits
 
-    sampleDelay = 60 / frequency 
-    Session = ProfileSession( solsticeRoot, frequency, sampleDelay, secondsPerState, profileGPU, length, humanReadable, zeroPercentageInReport, secondsToWaitAfterSolsticeCloses, secondsForTransition )
+    sampleDelay = 60 / samplesPerMinute 
+    Session = ProfileSession( solsticeRoot, samplesPerMinute, sampleDelay, samplesPerState, profileGPU, totalSessionLength, humanReadableUnits, zeroPercentageInReport, secondsToWaitAfterSolsticeCloses, secondsForTransition )
     Session.printStartSession()
 
 class GPUSnapshot:
@@ -157,14 +180,14 @@ class PerformanceSnapshot:
         conference = False
         rsusbipClient = False
 
-        for process in self.processSnapshots:
-            if process.processName == SolsticeClientProcess:
+        for processSnapshot in self.processSnapshots:
+            if processSnapshot.processName == SolsticeClientProcess:
                 solstice = True
-            elif process.processName == VirtualDisplayProcess and process.cpuPercentageUsed > 0.0:
+            elif processSnapshot.processName == VirtualDisplayProcess and processSnapshot.cpuPercentageUsed > 0.0:
                 virtualMonitor = True
-            elif process.processName == SolsticeConferenceProcess:
+            elif processSnapshot.processName == SolsticeConferenceProcess:
                 conference = True
-            elif process.processName == RsusbipclientProcess:
+            elif processSnapshot.processName == RsusbipclientProcess:
                 rsusbipClient = True
 
         if solstice and not conference and not virtualMonitor:
@@ -262,15 +285,15 @@ class ApplicationStateSamples:
         return output  
 
 class ProfileSession:
-    def __init__( self, solsticeRoot, frequency, sampleDelay, secondsPerState, profileGPU, sessionLengthSeconds, 
+    def __init__( self, solsticeRoot, samplesPerMinute, sampleDelay, samplesPerState, profileGPU, sessionLengthSeconds, 
         humanReadableUnits, zeroPercentageInReport, secondsToWaitAfterSolsticeCloses, transitionStateSeconds ):
         self.startedAt = time.time()
         self.solsticeRoot = solsticeRoot
         self.applicationStateSamples = []
         self.applicationStateAverages = []
-        self.frequency = frequency
+        self.samplesPerMinute = samplesPerMinute
         self.sampleDelay = sampleDelay
-        self.secondsPerState = secondsPerState
+        self.samplesPerState = samplesPerState
         self.profileGPU = profileGPU
         self.sessionLengthSeconds = sessionLengthSeconds
         self.humanReadableUnits = humanReadableUnits
@@ -283,8 +306,8 @@ class ProfileSession:
         if self.sessionLengthSeconds == 0:
             sessionLength = "Until Solstice closes"
         print( f"Profiling Solstice with settings:" )
-        print( f"  Frequency (samples per minute): {self.frequency}" )
-        print( f"  Time per state (seconds): {self.secondsPerState}" )
+        print( f"  Frequency (samples per minute): {self.samplesPerMinute}" )
+        print( f"  Number of samples per non-transitional state: {self.samplesPerState}" )
         print( f"  Length of transition period between states (seconds): {self.transitionStateSeconds}" )
         print( f"  Session length: {sessionLength}" )
         print( f"  Seconds to wait after Solstice closes to end profiling: {self.secondsToWaitAfterSolsticeCloses}")
@@ -312,7 +335,7 @@ class ProfileSession:
         else:
             memoryUnits += " (bytes)"
         averageOutput = f"Process,State,Time in State,# Samples,Lowest CPU %,Highest CPU %,Lowest Memory Used{memoryUnits}, Highest Memory Used{memoryUnits},Average CPU &,Average Memory Used{memoryUnits}\n"  
-        output = f"Time,Process,CPU%,Memory Used{memoryUnits},State\n"
+        output = f"Time,Process,CPU%,Memory Used{memoryUnits},State,Time To Gather Sample\n"
 
         # Sample data
         if len(self.applicationStateSamples) > 0:
@@ -340,7 +363,7 @@ class ProfileSession:
                         memory = processSnapshot.memory
                         if self.humanReadableUnits:
                             memory = memory / 1024 / 1024
-                        output += f"{datetime.datetime.fromtimestamp(performanceSnapshot.time)},{processSnapshot.processName},{processSnapshot.cpuPercentageUsed},{memory},{applicationStateSample.state}\n"
+                        output += f"{datetime.datetime.fromtimestamp(performanceSnapshot.time)},{processSnapshot.processName},{processSnapshot.cpuPercentageUsed},{memory},{applicationStateSample.state},{performanceSnapshot.timeToGatherSample}\n"
                 for pa in processAverages:
                     # TODO: merge GPU stats into same row
                     averageOutput += pa.csvRow()
@@ -407,6 +430,7 @@ if __name__ == '__main__':
     changedStatesLastFrame = False
     validStatesInSession = False
     appClosedTimeoutStart = None
+    showStopGathering = True
 
     while gatherSamples:
         performanceSnapshot = PerformanceSnapshot()
@@ -424,20 +448,23 @@ if __name__ == '__main__':
                 performanceSnapshot.addGPUSample( device, memory, temperature, gpuPercentageUsed )
 
         timeToQuery = time.time()
-        processes = [proc for proc in psutil.process_iter()]
-        performanceSnapshot.timeToGatherSample = time.time() - timeToQuery
-        try:
-            for process in processes:
-                if process.name() in ProcessesToFind:
-                    percentage = process.cpu_percent()
+        for proc in psutil.process_iter():
+            name = proc.name()
+            if name == None:
+                continue
+            try:
+                if name in ProcessesToFind:
+                    percentage = proc.cpu_percent()
                     if firstSampleTaken:
                         firstSampleTaken = False
-                        continue
-                    percentage = percentage / psutil.cpu_count()
-                    performanceSnapshot.addProcessSample( process.name(), percentage, process.memory_full_info().uss )
-        except Exception as e:
-            print( f"Warning: sample failed due to {e}" )
-            continue
+                        break
+                    percentage = percentage / CPUCount
+                    performanceSnapshot.addProcessSample( name, percentage, proc.memory_full_info().uss )
+            except Exception as e:
+                print( f"Warning: sample failed due to {e}. This sample will be discarded but script will continue." )
+                performanceSnapshot.processSnapshots = []
+                break
+        performanceSnapshot.timeToGatherSample = time.time() - timeToQuery        
 
         if len( performanceSnapshot.processSnapshots ) > 0 or applicationState != ApplicationState.NONE:
             currentApplicationState = performanceSnapshot.currentApplicationState()
@@ -511,12 +538,13 @@ if __name__ == '__main__':
             gatherSamples = False
 
         if applicationState != ApplicationState.NONE and \
-            ( Session.secondsPerState == 0 or time.time() - currentApplicationStateSamples.stateStarted < Session.secondsPerState ) and \
+            ( Session.samplesPerState == 0 or len( currentApplicationStateSamples.samples ) < Session.samplesPerState ) and \
             ( len( performanceSnapshot.gpuSnapshots ) > 0 or len( performanceSnapshot.processSnapshots ) > 0 ):
             currentApplicationStateSamples.samples.append( performanceSnapshot )
 
-        if Session.secondsPerState != 0 and time.time() - currentApplicationStateSamples.stateStarted >= Session.secondsPerState and not showStopGathering:
-            print("State sample timeout reached. Waiting for state change to start gathering additional samples.")
+        isNormalState = applicationState in [ ApplicationState.IDLE, ApplicationState.SHARING, ApplicationState.CONFERENCE ]
+        if isNormalState and Session.samplesPerState != 0 and len( currentApplicationStateSamples.samples ) >= Session.samplesPerState and showStopGathering:
+            print(f"Gathered all {Session.samplesPerState} samples in {applicationState}. Waiting for state change to start gathering additional samples.")
             showStopGathering = False
 
         delay = Session.sampleDelay - performanceSnapshot.timeToGatherSample

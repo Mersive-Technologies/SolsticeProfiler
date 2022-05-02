@@ -1,11 +1,14 @@
 {
-    "solsticeRoot": "C:\\Git\\Solstice\\",
-    "length": 0,
-    "frequency": 20,
-    "secondsPerState": 60,
+    "totalSessionLength": 0,
+    "samplesPerMinute": 20,
+    "samplesPerState": 10,
     "secondsForTransition": 10,
     "gpu": false,
     "humanReadableUnits": true,
     "zeroPercentageInReport": false,
-    "secondsToWaitAfterSolsticeCloses": 3
+    "secondsToWaitAfterSolsticeCloses": 5,
+    "processSolsticeClient": "SolsticeClient.exe",
+    "processVirtualDisplay": "SolsticeVirtualDisplay.exe",
+    "processSolsticeConference": "SolsticeConference.exe",
+    "processRsusbipclientProcess": "rsusbipclient.exe"
 }
